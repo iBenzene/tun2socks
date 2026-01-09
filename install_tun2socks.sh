@@ -494,38 +494,58 @@ install_tun2socks() {
     SERVICE_FILE="/etc/systemd/system/tun2socks.service"
     BINARY_PATH="$INSTALL_DIR/tun2socks"
 
-    step "获取最新版本下载链接..."
-    DOWNLOAD_URL=$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep "browser_download_url" | grep "linux-x86_64" | cut -d '"' -f 4)
-
-    if [ -z "$DOWNLOAD_URL" ]; then
-        error "未找到适用于 linux-x86_64 的二进制文件下载链接, 请检查网络或手动下载。"
-
-        if [ "$DNS_MODIFIED" = true ]; then
-            restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+    # 检查二进制文件是否已存在
+    SKIP_DOWNLOAD=false
+    if [ -f "$BINARY_PATH" ] && [ -x "$BINARY_PATH" ]; then
+        info "检测到 tun2socks 二进制文件已存在: $BINARY_PATH"
+        
+        # 尝试获取现有文件的版本信息
+        EXISTING_VERSION=$("$BINARY_PATH" --version 2>/dev/null | head -n 1 || echo "未知版本")
+        info "现有文件版本: $EXISTING_VERSION"
+        
+        read -r -p "是否跳过下载并使用现有文件? (Y/n): " response
+        if [[ ! "$response" =~ ^([nN][oO]|[nN])$ ]]; then
+            SKIP_DOWNLOAD=true
+            success "将使用现有的二进制文件。"
+        else
+            info "将重新下载最新版本。"
         fi
-
-        exit 1
     fi
 
-    step "正在下载最新二进制文件: "
-    info "$DOWNLOAD_URL"
-    cleanup_on_fail() {
+    if [ "$SKIP_DOWNLOAD" = false ]; then
+        step "获取最新版本下载链接..."
+        DOWNLOAD_URL=$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep "browser_download_url" | grep "linux-x86_64" | cut -d '"' -f 4)
+
+        if [ -z "$DOWNLOAD_URL" ]; then
+            error "未找到适用于 linux-x86_64 的二进制文件下载链接, 请检查网络或手动下载。"
+
+            if [ "$DNS_MODIFIED" = true ]; then
+                restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+            fi
+
+            exit 1
+        fi
+
+        step "正在下载最新二进制文件: "
+        info "$DOWNLOAD_URL"
+        cleanup_on_fail() {
+            trap - INT TERM EXIT
+            warning "操作被中断或失败, 正在执行清理..."
+            if [ "$DNS_MODIFIED" = true ]; then
+                restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+            fi
+            exit 1
+        }
+        trap cleanup_on_fail INT TERM EXIT
+        curl -L -o "$BINARY_PATH" "$DOWNLOAD_URL"
         trap - INT TERM EXIT
-        warning "操作被中断或失败, 正在执行清理..."
+
         if [ "$DNS_MODIFIED" = true ]; then
             restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
         fi
-        exit 1
-    }
-    trap cleanup_on_fail INT TERM EXIT
-    curl -L -o "$BINARY_PATH" "$DOWNLOAD_URL"
-    trap - INT TERM EXIT
 
-    if [ "$DNS_MODIFIED" = true ]; then
-        restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+        chmod +x "$BINARY_PATH"
     fi
-
-    chmod +x "$BINARY_PATH"
 
     step "创建配置文件..."
     mkdir -p "$CONFIG_DIR"
