@@ -459,35 +459,6 @@ install_tun2socks() {
     RESOLV_CONF_BAK="/etc/resolv.conf.bak"
     WAS_IMMUTABLE=false
 
-    step "检查 /etc/resolv.conf 锁定状态..."
-    if lsattr -d "$RESOLV_CONF" 2>/dev/null | grep -q -- '-i-'; then
-        info "/etc/resolv.conf 文件当前被锁定 (immutable), 尝试解锁..."
-        # 高危操作: 解除 DNS 配置文件的不可修改属性
-        chattr -i "$RESOLV_CONF" || {
-            error "无法解锁 /etc/resolv.conf, 请检查权限。"
-            exit 1
-        }
-        WAS_IMMUTABLE=true
-        success "解锁成功。"
-    else
-        info "/etc/resolv.conf 未被锁定。"
-    fi
-
-    step "检查 GitHub 连通性..."
-    DNS_MODIFIED=false
-    if test_github_access; then
-        info "GitHub 访问正常, 跳过 DNS64 设置。"
-    else
-        warning "无法直接访问 GitHub, 尝试设置 DNS64..."
-        step "备份当前 DNS 配置..."
-        cp "$RESOLV_CONF" "$RESOLV_CONF_BAK" || { warning "备份 DNS 配置失败, 可能文件不存在或权限不足。"; }
-
-        if ! set_dns64_servers "$MODE" "$RESOLV_CONF" "$WAS_IMMUTABLE" "$RESOLV_CONF_BAK"; then
-            exit 1
-        fi
-        DNS_MODIFIED=true
-    fi
-
     REPO="heiher/hev-socks5-tunnel"
     INSTALL_DIR="/usr/local/bin"
     CONFIG_DIR="/etc/tun2socks"
@@ -513,6 +484,35 @@ install_tun2socks() {
     fi
 
     if [ "$SKIP_DOWNLOAD" = false ]; then
+        step "检查 /etc/resolv.conf 锁定状态..."
+        if lsattr -d "$RESOLV_CONF" 2>/dev/null | grep -q -- '-i-'; then
+            info "/etc/resolv.conf 文件当前被锁定 (immutable), 尝试解锁..."
+            # 高危操作: 解除 DNS 配置文件的不可修改属性
+            chattr -i "$RESOLV_CONF" || {
+                error "无法解锁 /etc/resolv.conf, 请检查权限。"
+                exit 1
+            }
+            WAS_IMMUTABLE=true
+            success "解锁成功。"
+        else
+            info "/etc/resolv.conf 未被锁定。"
+        fi
+
+        step "检查 GitHub 连通性..."
+        DNS_MODIFIED=false
+        if test_github_access; then
+            info "GitHub 访问正常, 跳过 DNS64 设置。"
+        else
+            warning "无法直接访问 GitHub, 尝试设置 DNS64..."
+            step "备份当前 DNS 配置..."
+            cp "$RESOLV_CONF" "$RESOLV_CONF_BAK" || { warning "备份 DNS 配置失败, 可能文件不存在或权限不足。"; }
+
+            if ! set_dns64_servers "$MODE" "$RESOLV_CONF" "$WAS_IMMUTABLE" "$RESOLV_CONF_BAK"; then
+                exit 1
+            fi
+            DNS_MODIFIED=true
+        fi
+
         step "获取最新版本下载链接..."
         DOWNLOAD_URL=$(curl -s https://api.github.com/repos/$REPO/releases/latest | grep "browser_download_url" | grep "linux-x86_64" | cut -d '"' -f 4)
 
