@@ -37,6 +37,7 @@ ALTERNATE_DNS64_SERVERS=(
 # 脚本操作的全局变量
 ACTION=""
 MODE="alice" # 默认安装模式
+IP_VERSION="4" # 默认为 IPv4 出口, 可选 "4" 或 "6"
 
 #================================================================================
 # 日志和工具函数
@@ -70,6 +71,10 @@ show_usage() {
     echo -e "  $0 -r          卸载 tun2socks"
     echo -e "  $0 -s          切换 Alice 模式的 Socks5 端口"
     echo -e "  $0 -u          检查脚本更新"
+    echo
+    echo -e "${CYAN}IP 版本选择: ${NC}"
+    echo -e "  安装时会提示选择添加 IPv4 出口 (适用于 IPv6 Only 主机)"
+    echo -e "  或添加 IPv6 出口 (适用于 IPv4 Only / 双栈主机, 如套 WARP)"
 }
 
 test_dns64_server() {
@@ -312,10 +317,44 @@ select_alice_port() {
     done
 }
 
+select_ip_version() {
+    echo >&2
+    echo -e "${YELLOW}=========================================================${NC}" >&2
+    echo -e "${GREEN}请选择要添加的出口类型${NC}" >&2
+    echo -e "${YELLOW}=========================================================${NC}" >&2
+    echo >&2
+    info "选项说明:" >&2
+    echo -e "  ${GREEN}1) 添加 IPv4 出口${NC} - 适用于 IPv6 Only 主机 (通过 Socks5 代理获取 IPv4)" >&2
+    echo -e "  ${GREEN}2) 添加 IPv6 出口${NC} - 适用于 IPv4 Only / 双栈主机 (通过 Socks5 代理获取 IPv6)" >&2
+    echo >&2
+
+    local choice
+    while true; do
+        read -r -p "请选择 (1 或 2, 默认为 1): " choice
+        choice=${choice:-1}
+        case "$choice" in
+        1)
+            info "已选择: 添加 IPv4 出口" >&2
+            echo "4"
+            return
+            ;;
+        2)
+            info "已选择: 添加 IPv6 出口" >&2
+            echo "6"
+            return
+            ;;
+        *)
+            error "无效的选择, 请输入 1 或 2。" >&2
+            ;;
+        esac
+    done
+}
+
 cleanup_ip_rules() {
     step "正在清理残留的 IP 规则和路由..."
 
     # 高危操作: 删除系统 IP 路由规则, 可能影响网络连接
+    # IPv4 规则清理
     ip rule del fwmark 438 lookup main pref 10 2>/dev/null || true
     ip -6 rule del fwmark 438 lookup main pref 10 2>/dev/null || true
     ip route del default dev tun0 table 20 2>/dev/null || true
@@ -326,10 +365,20 @@ cleanup_ip_rules() {
     ip rule del to 172.16.0.0/12 lookup main pref 16 2>/dev/null || true
     ip rule del to 192.168.0.0/16 lookup main pref 16 2>/dev/null || true
 
+    # IPv6 规则清理
+    ip -6 route del default dev tun0 table 20 2>/dev/null || true
+    ip -6 rule del lookup 20 pref 20 2>/dev/null || true
+    ip -6 rule del to ::1/128 lookup main pref 16 2>/dev/null || true
+    ip -6 rule del to fe80::/10 lookup main pref 16 2>/dev/null || true
+    ip -6 rule del to fc00::/7 lookup main pref 16 2>/dev/null || true
+
     info "正在循环清理优先级为 15 的规则..."
     # 高危操作: 批量删除优先级为 15 的所有路由规则
     while ip rule del pref 15 2>/dev/null; do
-        info "删除了一条优先级为 15 的规则。"
+        info "删除了一条优先级为 15 的 IPv4 规则。"
+    done
+    while ip -6 rule del pref 15 2>/dev/null; do
+        info "删除了一条优先级为 15 的 IPv6 规则。"
     done
 
     success "IP 规则和路由清理完成。"
@@ -424,11 +473,19 @@ install_tun2socks() {
         info "/etc/resolv.conf 未被锁定。"
     fi
 
-    step "备份当前 DNS 配置..."
-    cp "$RESOLV_CONF" "$RESOLV_CONF_BAK" || { warning "备份 DNS 配置失败, 可能文件不存在或权限不足。"; }
+    step "检查 GitHub 连通性..."
+    DNS_MODIFIED=false
+    if test_github_access; then
+        info "GitHub 访问正常, 跳过 DNS64 设置。"
+    else
+        warning "无法直接访问 GitHub, 尝试设置 DNS64..."
+        step "备份当前 DNS 配置..."
+        cp "$RESOLV_CONF" "$RESOLV_CONF_BAK" || { warning "备份 DNS 配置失败, 可能文件不存在或权限不足。"; }
 
-    if ! set_dns64_servers "$MODE" "$RESOLV_CONF" "$WAS_IMMUTABLE" "$RESOLV_CONF_BAK"; then
-        exit 1
+        if ! set_dns64_servers "$MODE" "$RESOLV_CONF" "$WAS_IMMUTABLE" "$RESOLV_CONF_BAK"; then
+            exit 1
+        fi
+        DNS_MODIFIED=true
     fi
 
     REPO="heiher/hev-socks5-tunnel"
@@ -443,7 +500,9 @@ install_tun2socks() {
     if [ -z "$DOWNLOAD_URL" ]; then
         error "未找到适用于 linux-x86_64 的二进制文件下载链接, 请检查网络或手动下载。"
 
-        restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+        if [ "$DNS_MODIFIED" = true ]; then
+            restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+        fi
 
         exit 1
     fi
@@ -453,20 +512,34 @@ install_tun2socks() {
     cleanup_on_fail() {
         trap - INT TERM EXIT
         warning "操作被中断或失败, 正在执行清理..."
-        restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+        if [ "$DNS_MODIFIED" = true ]; then
+            restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+        fi
         exit 1
     }
     trap cleanup_on_fail INT TERM EXIT
     curl -L -o "$BINARY_PATH" "$DOWNLOAD_URL"
     trap - INT TERM EXIT
 
-    restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+    if [ "$DNS_MODIFIED" = true ]; then
+        restore_dns_config "$RESOLV_CONF" "$RESOLV_CONF_BAK" "$WAS_IMMUTABLE"
+    fi
 
     chmod +x "$BINARY_PATH"
 
     step "创建配置文件..."
     mkdir -p "$CONFIG_DIR"
     CONFIG_FILE="$CONFIG_DIR/config.yaml"
+
+    # 选择 IP 版本
+    IP_VERSION=$(select_ip_version)
+
+    # 根据 IP 版本设置隧道地址
+    if [ "$IP_VERSION" = "6" ]; then
+        TUNNEL_IP_CONFIG="ipv6: fd00:198:18::1"
+    else
+        TUNNEL_IP_CONFIG="ipv4: 198.18.0.1"
+    fi
 
     if [ "$MODE" = "alice" ]; then
         SOCKS_PORT=$(select_alice_port)
@@ -476,7 +549,7 @@ tunnel:
   name: tun0
   mtu: 8500
   multi-queue: true
-  ipv4: 198.18.0.1
+  $TUNNEL_IP_CONFIG
 
 socks5:
   port: $SOCKS_PORT
@@ -498,7 +571,7 @@ tunnel:
   name: tun0
   mtu: 8500
   multi-queue: true
-  ipv4: 198.18.0.1
+  $TUNNEL_IP_CONFIG
 
 socks5:
   port: $(echo "$SOCKS_PORT" | tr -d '\r')
@@ -510,12 +583,12 @@ $([ -n "$SOCKS_PASSWORD" ] && echo "  password: '$(echo "$SOCKS_PASSWORD" | tr -
 EOF
         }
     else
-        cat >"$CONFIG_FILE" <<'EOF'
+        cat >"$CONFIG_FILE" <<EOF
 tunnel:
   name: tun0
   mtu: 8500
   multi-queue: true
-  ipv4: 198.18.0.1
+  $TUNNEL_IP_CONFIG
 
 socks5:
   port: 8888
@@ -527,7 +600,72 @@ EOF
 
     step "生成 systemd 服务文件 (tun2socks.service)..."
 
-    if [ "$MODE" = "alice" ]; then
+    # 根据 IP 版本生成不同的路由规则
+    if [ "$IP_VERSION" = "6" ]; then
+        # IPv6 出口模式: 检测主机 IPv6 地址并添加排除规则
+        MAIN_IP6=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+        RULE_ADD_FROM_MAIN_IP=""
+        RULE_DEL_FROM_MAIN_IP=""
+        RULE_ADD_SOCKS5_BYPASS=""
+        RULE_DEL_SOCKS5_BYPASS=""
+
+        if [ -n "$MAIN_IP6" ]; then
+            info "检测到主机 IPv6 地址: $MAIN_IP6"
+            info "将添加规则以允许源 IP 为 $MAIN_IP6 的流量通过主路由表。"
+            RULE_ADD_FROM_MAIN_IP="ExecStartPost=/sbin/ip -6 rule add from $MAIN_IP6 lookup main pref 15"
+            RULE_DEL_FROM_MAIN_IP="ExecStop=/sbin/ip -6 rule del from $MAIN_IP6 lookup main pref 15"
+        fi
+
+        # 检测配置中的 SOCKS5 地址, 如果是 IPv6 地址则添加排除规则
+        if [ -f "$CONFIG_FILE" ]; then
+            SOCKS5_ADDR=$(grep -oP "address:\s*'\K[^']+" "$CONFIG_FILE" 2>/dev/null || true)
+            # 检查是否为 IPv6 地址
+            if [[ "$SOCKS5_ADDR" == *:* ]] && [[ "$SOCKS5_ADDR" != "127.0.0.1" ]]; then
+                info "检测到 SOCKS5 代理 IPv6 地址: $SOCKS5_ADDR"
+                info "将添加规则以确保到 SOCKS5 代理的流量不经过隧道。"
+                RULE_ADD_SOCKS5_BYPASS="ExecStartPost=/sbin/ip -6 rule add to $SOCKS5_ADDR/128 lookup main pref 14"
+                RULE_DEL_SOCKS5_BYPASS="ExecStop=/sbin/ip -6 rule del to $SOCKS5_ADDR/128 lookup main pref 14"
+            fi
+        fi
+
+        # IPv6 出口模式的 systemd 服务文件
+        cat >"$SERVICE_FILE" <<EOF
+[Unit]
+Description=Tun2Socks Tunnel Service (IPv6 Exit)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$BINARY_PATH $CONFIG_FILE
+ExecStartPost=/bin/sleep 1
+
+ExecStartPost=/sbin/ip rule add fwmark 438 lookup main pref 10
+ExecStartPost=/sbin/ip -6 rule add fwmark 438 lookup main pref 10
+ExecStartPost=/sbin/ip -6 route add default dev tun0 table 20
+ExecStartPost=/sbin/ip -6 rule add lookup 20 pref 20
+${RULE_ADD_SOCKS5_BYPASS}
+${RULE_ADD_FROM_MAIN_IP}
+ExecStartPost=/sbin/ip -6 rule add to ::1/128 lookup main pref 16
+ExecStartPost=/sbin/ip -6 rule add to fe80::/10 lookup main pref 16
+ExecStartPost=/sbin/ip -6 rule add to fc00::/7 lookup main pref 16
+
+ExecStop=/sbin/ip rule del fwmark 438 lookup main pref 10
+ExecStop=/sbin/ip -6 rule del fwmark 438 lookup main pref 10
+ExecStop=/sbin/ip -6 route del default dev tun0 table 20
+ExecStop=/sbin/ip -6 rule del lookup 20 pref 20
+${RULE_DEL_SOCKS5_BYPASS}
+${RULE_DEL_FROM_MAIN_IP}
+ExecStop=/sbin/ip -6 rule del to ::1/128 lookup main pref 16
+ExecStop=/sbin/ip -6 rule del to fe80::/10 lookup main pref 16
+ExecStop=/sbin/ip -6 rule del to fc00::/7 lookup main pref 16
+
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    else
+        # IPv4 出口模式: 检测主机 IPv4 地址并添加排除规则
         MAIN_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
         RULE_ADD_FROM_MAIN_IP=""
         RULE_DEL_FROM_MAIN_IP=""
@@ -538,12 +676,11 @@ EOF
             RULE_ADD_FROM_MAIN_IP="ExecStartPost=/sbin/ip rule add from $MAIN_IP lookup main pref 15"
             RULE_DEL_FROM_MAIN_IP="ExecStop=/sbin/ip rule del from $MAIN_IP lookup main pref 15"
         fi
-    fi
 
-    # 高危操作: 创建系统服务文件, 服务将在启动时修改网络路由规则
-    cat >"$SERVICE_FILE" <<EOF
+        # IPv4 出口模式的 systemd 服务文件
+        cat >"$SERVICE_FILE" <<EOF
 [Unit]
-Description=Tun2Socks Tunnel Service
+Description=Tun2Socks Tunnel Service (IPv4 Exit)
 After=network.target
 
 [Service]
@@ -578,6 +715,7 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+    fi
 
     step "重新加载 systemd 配置..."
     # 高危操作: 重新加载系统服务配置
