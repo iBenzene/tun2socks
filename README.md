@@ -80,7 +80,7 @@ journalctl -u tun2socks.service -f
 
 ### Alice Networks
 
-[Alice Networks](https://www.alicenetworks.net/) 大善人提供免费的纯 IPv6 VPS，脚本内置了其 SOCKS5 代理节点配置。
+[Alice Networks](https://alicenetworks.net/) 大善人提供免费的纯 IPv6 VPS，脚本内置了其 SOCKS5 代理节点配置。
 
 使用 `alice` 模式安装，可选择多个台湾家宽出口节点（端口 10001-10008）。
 

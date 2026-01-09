@@ -80,7 +80,7 @@ journalctl -u tun2socks.service -f
 
 ### Alice Networks
 
-[Alice Networks](https://www.alicenetworks.net/) offers free pure IPv6 VPS. The script includes built-in SOCKS5 proxy node configurations.
+[Alice Networks](https://alicenetworks.net/) offers free pure IPv6 VPS. The script includes built-in SOCKS5 proxy node configurations.
 
 Use `alice` mode to install, with multiple Taiwan residential exit nodes available (ports 10001-10008).
 
